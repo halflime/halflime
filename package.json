@@ -1,0 +1,43 @@
+{
+  "name": "halflime",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.9.1",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Alex Zappa (FreshJuice)",
+  "homepage": "https://halflime.dev",
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_TOKEN": {
+        "description": "Generate a private admin token with `openssl rand -hex 32`. Save it for your MCP client or HTTP API calls."
+      },
+      "HASH_SECRET": {
+        "description": "Run `openssl rand -hex 32` again for a separate session hashing key. Keep it private and stable across deployments."
+      }
+    }
+  },
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "test": "pnpm run test:bundle && node --test test/*.test.mjs",
+    "test:bundle": "esbuild src/index.ts --bundle --format=esm --platform=browser --external:node:* --outfile=.test/worker.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261116.1",
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "miniflare": "5.20261116.0-beta",
+    "typescript": "7.0.2",
+    "wrangler": "4.163.0"
+  }
+}
