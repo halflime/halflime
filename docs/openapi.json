@@ -12,6 +12,17 @@
   }],
   "security": [{ "AdminBearer": [] }],
   "paths": {
+    "/": {
+      "get": {
+        "operationId": "redirectToHomepage",
+        "summary": "Redirect to the instance homepage",
+        "description": "Defaults to https://halflime.dev/. The operator can override the destination with HOMEPAGE_URL. Request query parameters are not forwarded.",
+        "security": [],
+        "responses": { "302": { "description": "Temporary redirect with an empty body.", "headers": {
+          "Location": { "required": true, "schema": { "type": "string", "format": "uri" }, "example": "https://halflime.dev/" }
+        } } }
+      }
+    },
     "/health": {
       "get": {
         "operationId": "getHealth",

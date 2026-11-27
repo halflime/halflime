@@ -10,6 +10,8 @@ Keep `pnpm run deploy` as the Workers Builds deploy command. On each deployment 
 
 At the `workers.dev` URL Cloudflare gives you, connect to [`/mcp`](../README.md#mcp) and call `list_projects`. On a new instance, look for `{ "projects": [], "hasMore": false }`. That checks the admin token and the database tables; `/health` only tells you the Worker is running.
 
+Opening the instance root in a browser redirects to `https://halflime.dev/`. To send visitors to your own homepage, add `"vars": { "HOMEPAGE_URL": "https://example.org/about/" }` to the top level of your core `wrangler.jsonc` and redeploy. Use an absolute HTTPS URL without embedded credentials. If the setting is missing or invalid, the Worker uses the HalfLime homepage.
+
 ## Local instance
 
 In the core repository, use Node 24 and pnpm 12.9.1. Copy `.dev.vars.example` to `.dev.vars` and fill in two separate random values for local use. Leave production secrets out of this file.

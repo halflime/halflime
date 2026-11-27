@@ -25,6 +25,21 @@ before(async () => {
 });
 after(async () => { await mf?.dispose(); });
 
+test('the public instance root redirects only to the configured homepage or the HalfLime default', async () => {
+  const fallback = 'https://halflime.dev/';
+  const custom = 'https://example.org/about/';
+  for (const [value, expected] of [[undefined, fallback], [custom, custom], ['/relative', fallback], ['javascript:void(0)', fallback], ['https://user@example.org/', fallback]]) {
+    const instance = new Miniflare(convertV4MiniflareOptions({ modules: true, scriptPath: '.test/worker.js', compatibilityDate: '2026-11-16', compatibilityFlags: ['nodejs_compat'], bindings: value === undefined ? {} : { HOMEPAGE_URL: value } }));
+    try {
+      const res = await instance.dispatchFetch('http://localhost/?next=https://other.example', { redirect: 'manual' });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('Location'), expected);
+      assert.equal(res.headers.get('Referrer-Policy'), 'no-referrer');
+      assert.equal((await instance.dispatchFetch('http://localhost/', { method: 'POST', redirect: 'manual' })).status, 503);
+    } finally { await instance.dispose(); }
+  }
+});
+
 test('OpenAPI matches the HTTP routes and their workerd responses', async () => {
   const spec = JSON.parse(await readFile('docs/openapi.json', 'utf8'));
   assert.equal(spec.openapi, '3.1.1');
@@ -40,7 +55,7 @@ test('OpenAPI matches the HTTP routes and their workerd responses', async () => 
     const op = spec.paths[path][method.toLowerCase()];
     covered.add(`${method} ${path}`);
     const security = op.security ?? spec.security;
-    if (method === 'OPTIONS' || path === '/health') assert.deepEqual(security, []);
+    if (method === 'OPTIONS' || path === '/health' || path === '/') assert.deepEqual(security, []);
     if (status < 300) {
       const params = [...(spec.paths[path].parameters ?? []), ...(op.parameters ?? [])].map(resolve);
       assert.deepEqual(params.filter(p => p.in === 'query' && p.required).map(p => p.name).sort(), Object.keys(query).sort());
@@ -57,10 +72,10 @@ test('OpenAPI matches the HTTP routes and their workerd responses', async () => 
     }
     const url = new URL(path.replace('{id}', projectId), 'http://localhost');
     url.search = new URLSearchParams(query).toString();
-    const res = await mf.dispatchFetch(url, { method, headers, body: JSON.stringify(body) });
+    const res = await mf.dispatchFetch(url, { method, headers, body: JSON.stringify(body), redirect: 'manual' });
     assert.equal(res.status, status, `${method} ${path}`);
     const reply = resolve(op.responses[status]);
-    if (status === 204) {
+    if (status === 204 || status === 302) {
       assert.equal(reply.content, undefined);
       assert.equal(await res.text(), '');
       for (const [key, header] of Object.entries(reply.headers)) validate(header.schema, res.headers.get(key));
@@ -70,6 +85,7 @@ test('OpenAPI matches the HTTP routes and their workerd responses', async () => 
       return value;
     }
   }
+  await call('GET', '/', 302);
   await call('GET', '/health', 200);
   const Origin = 'https://docs.example';
   const project = await call('POST', '/api/v1/projects', 201, { body: { name: 'Contract', type: 'website', origins: [Origin], properties: ['paid'] } });

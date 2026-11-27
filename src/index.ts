@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { timingSafeEqual } from 'node:crypto';
 
-export type Env = { DB: D1Database; ADMIN_TOKEN: string; HASH_SECRET: string };
+export type Env = { DB: D1Database; ADMIN_TOKEN: string; HASH_SECRET: string; HOMEPAGE_URL?: string };
 const encoder = new TextEncoder();
 const uuid = z.string().uuid();
 const text = (max: number) => z.string().min(1).max(max);
@@ -172,6 +172,11 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);
+      if (url.pathname === '/' && request.method === 'GET') {
+        const home = env.HOMEPAGE_URL ? URL.parse(env.HOMEPAGE_URL) : null;
+        const location = home?.protocol === 'https:' && !home.username && !home.password ? home.href : 'https://halflime.dev/';
+        return new Response(null, { status: 302, headers: { Location: location, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+      }
       if (url.pathname === '/health' && request.method === 'GET') return json({ ok: true });
       if (![env.ADMIN_TOKEN, env.HASH_SECRET].every(value => typeof value === 'string' && value.length >= 32 && value.length <= 1024)) throw new HttpError(503, 'Instance is not configured');
       if (url.pathname === '/api/v1/events' && request.method === 'OPTIONS') return await preflight(request, env);

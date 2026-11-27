@@ -71,6 +71,8 @@ One session can appear in several breakdown rows. Use `get_stats` or `/api/v1/st
 
 ## Errors and health checks
 
+`GET /` is public and returns `302 Found` with the homepage in `Location`. The default is `https://halflime.dev/`. Operators can [set `HOMEPAGE_URL`](deployment.md#hosted-instance) to choose a different destination. The redirect does not forward the request query string.
+
 The HTTP API returns errors as JSON with an `error` field. Check the status before retrying:
 
 | Status | What to check |
