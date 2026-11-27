@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -23,6 +24,70 @@ before(async () => {
   await db.exec((await readFile('migrations/0001.sql', 'utf8')).replaceAll('\n', ' '));
 });
 after(async () => { await mf?.dispose(); });
+
+test('OpenAPI matches the HTTP routes and their workerd responses', async () => {
+  const spec = JSON.parse(await readFile('docs/openapi.json', 'utf8'));
+  assert.equal(spec.openapi, '3.1.1');
+  const validator = new AjvJsonSchemaValidator();
+  const validate = (schema, value) => {
+    const result = validator.getValidator({ ...schema, components: spec.components })(value);
+    assert.ok(result.valid, result.errorMessage);
+  };
+  const resolve = obj => obj.$ref ? obj.$ref.slice(2).split('/').reduce((v, k) => v[k], spec) : obj;
+  const covered = new Set();
+  let projectId = '', appKey;
+  async function call(method, path, status, { body, headers = {}, query = {} } = {}) {
+    const op = spec.paths[path][method.toLowerCase()];
+    covered.add(`${method} ${path}`);
+    const security = op.security ?? spec.security;
+    if (method === 'OPTIONS' || path === '/health') assert.deepEqual(security, []);
+    if (status < 300) {
+      const params = [...(spec.paths[path].parameters ?? []), ...(op.parameters ?? [])].map(resolve);
+      assert.deepEqual(params.filter(p => p.in === 'query' && p.required).map(p => p.name).sort(), Object.keys(query).sort());
+    }
+    for (const name of Object.keys(security[0] ?? {})) {
+      const scheme = spec.components.securitySchemes[name];
+      if (scheme.type === 'http' && scheme.scheme === 'bearer') headers.Authorization = `Bearer ${token}`;
+      else if (scheme.type === 'apiKey' && scheme.in === 'header') headers[scheme.name] = appKey;
+      else assert.fail(`Unexpected security scheme: ${name}`);
+    }
+    if (body !== undefined) {
+      validate(op.requestBody.content['application/json'].schema, body);
+      headers['Content-Type'] = 'application/json';
+    }
+    const url = new URL(path.replace('{id}', projectId), 'http://localhost');
+    url.search = new URLSearchParams(query).toString();
+    const res = await mf.dispatchFetch(url, { method, headers, body: JSON.stringify(body) });
+    assert.equal(res.status, status, `${method} ${path}`);
+    const reply = resolve(op.responses[status]);
+    if (status === 204) {
+      assert.equal(reply.content, undefined);
+      assert.equal(await res.text(), '');
+      for (const [key, header] of Object.entries(reply.headers)) validate(header.schema, res.headers.get(key));
+    } else {
+      const value = await res.json();
+      validate(reply.content['application/json'].schema, value);
+      return value;
+    }
+  }
+  await call('GET', '/health', 200);
+  const Origin = 'https://docs.example';
+  const project = await call('POST', '/api/v1/projects', 201, { body: { name: 'Contract', type: 'website', origins: [Origin], properties: ['paid'] } });
+  ({ id: projectId, appKey } = project);
+  await call('GET', '/api/v1/projects', 200);
+  await call('GET', '/api/v1/projects/{id}', 200);
+  await call('OPTIONS', '/api/v1/events', 204, { headers: { Origin, 'Access-Control-Request-Method': 'POST' } });
+  const body = [event({ props: { paid: false } }), event({ systemProps: { isDebug: 'ignored' } })];
+  await call('POST', '/api/v1/events', 403, { body });
+  await call('POST', '/api/v1/events', 200, { body, headers: { Origin } });
+  const query = { projectId, from: new Date(Date.now() - 60000).toISOString(), to: new Date(Date.now() + 60000).toISOString() };
+  await call('GET', '/api/v1/stats', 200, { query });
+  await call('GET', '/api/v1/breakdown', 200, { query: { ...query, dimension: 'prop:paid' } });
+  await call('GET', '/api/v1/timeseries', 200, { query: { ...query, interval: 'hour' } });
+  await call('GET', '/api/v1/stats', 400, { query: { ...query, extra: 'unknown' } });
+  assert.deepEqual(covered, new Set(Object.entries(spec.paths).flatMap(([path, ops]) =>
+    Object.keys(ops).filter(k => /^(get|post|put|patch|delete|head|options|trace)$/.test(k)).map(k => `${k.toUpperCase()} ${path}`))));
+});
 
 test('project creation and idempotent atomic ingestion use real D1', async () => {
   const response = await request('/api/v1/projects', { name: 'Test app', type: 'app', properties: ['plan'] });

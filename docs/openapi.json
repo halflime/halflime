@@ -1,0 +1,292 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "HalfLime instance HTTP API",
+    "version": "0.1.0",
+    "description": "Send events, manage projects and read aggregate reports on your own HalfLime Worker. The separate /mcp endpoint speaks the official stateless Streamable HTTP MCP protocol; MCP tools are not REST routes."
+  },
+  "servers": [{
+    "url": "{instanceUrl}",
+    "description": "Your installation, not the HalfLime documentation site.",
+    "variables": { "instanceUrl": { "default": "http://localhost:8787", "description": "Replace with your Worker's HTTPS origin, without a trailing slash." } }
+  }],
+  "security": [{ "AdminBearer": [] }],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Check Worker liveness",
+        "description": "Does not check secrets or D1. Use an authenticated project list request to check the installation.",
+        "security": [],
+        "responses": {
+          "200": { "description": "Worker is running.", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["ok"], "properties": { "ok": { "type": "boolean", "const": true } }, "additionalProperties": false
+          } } } }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "post": {
+        "operationId": "ingestEvents",
+        "summary": "Store a batch of events",
+        "description": "Validates the whole batch before writing it atomically. Event IDs are case-insensitive and deduplicated within a project. Retry the same payload after a lost acknowledgement. An Origin is required for website projects and optional for app projects; when present it must be an exact origin registered on this project.",
+        "security": [{ "AppKey": [] }],
+        "parameters": [{ "name": "Origin", "in": "header", "description": "Origin of the sending app or website; omit for a native app without an origin.", "schema": { "$ref": "#/components/schemas/RegisteredOrigin" } }],
+        "requestBody": {
+          "required": true, "description": "UTF-8 JSON, at most 64 KiB for the entire request body.",
+          "content": { "application/json": { "schema": { "type": "array", "minItems": 1, "maxItems": 25, "items": { "$ref": "#/components/schemas/Event" } } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Count of newly inserted rows, not the batch length. A batch of duplicates returns zero.",
+            "headers": {
+              "Access-Control-Allow-Origin": { "description": "Echoed only when the request included an allowed Origin.", "schema": { "type": "string" } },
+              "Vary": { "description": "Set when an Origin is echoed.", "schema": { "type": "string", "const": "Origin" } }
+            },
+            "content": { "application/json": { "schema": { "type": "object", "required": ["accepted"], "properties": { "accepted": { "type": "integer", "minimum": 0, "maximum": 25 } }, "additionalProperties": false }, "example": { "accepted": 1 } } }
+          },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/InvalidAppKey" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      },
+      "options": {
+        "operationId": "preflightEvents",
+        "summary": "Check browser permission to send events",
+        "description": "No key or token is sent with a preflight. An origin registered by any project can pass this check. The subsequent POST checks the origin against the project that owns the App-Key.",
+        "security": [],
+        "parameters": [
+          { "name": "Origin", "in": "header", "required": true, "schema": { "$ref": "#/components/schemas/RegisteredOrigin" } },
+          { "name": "Access-Control-Request-Method", "in": "header", "required": true, "schema": { "type": "string", "const": "POST" } },
+          { "name": "Access-Control-Request-Headers", "in": "header", "description": "Optional comma-separated list. Only App-Key and Content-Type are allowed, case-insensitively.", "schema": { "type": "string" }, "example": "app-key,content-type" }
+        ],
+        "responses": {
+          "204": {
+            "description": "Allowed; empty body. No credentialed CORS.",
+            "headers": {
+              "Access-Control-Allow-Origin": { "required": true, "description": "The exact request origin.", "schema": { "$ref": "#/components/schemas/RegisteredOrigin" } },
+              "Access-Control-Allow-Methods": { "required": true, "schema": { "type": "string", "const": "POST" } },
+              "Access-Control-Allow-Headers": { "required": true, "schema": { "type": "string", "const": "App-Key, Content-Type" } },
+              "Vary": { "required": true, "schema": { "type": "string", "const": "Origin" } },
+              "Cache-Control": { "required": true, "schema": { "type": "string", "const": "no-store" } }
+            }
+          },
+          "403": { "description": "Missing, malformed or unregistered origin, wrong requested method, or disallowed request headers.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "parameters": [{ "$ref": "#/components/parameters/AdminOrigin" }],
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List projects without their ingestion keys",
+        "description": "Newest first, then by ID for tied creation times. There is no pagination cursor.",
+        "responses": {
+          "200": { "description": "Up to 100 projects. hasMore is true if additional projects exist.", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["projects", "hasMore"], "properties": {
+              "projects": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/Project" } }, "hasMore": { "type": "boolean" }
+            }, "additionalProperties": false
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create a project and return its ingestion key once",
+        "requestBody": {
+          "required": true, "description": "UTF-8 JSON, at most 64 KiB.",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProject" }, "example": { "name": "Desktop editor", "type": "app", "properties": ["format"] } } }
+        },
+        "responses": {
+          "201": { "description": "Project settings and the public, ingest-only appKey. Save the key now; only its hash is stored.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreatedProject" } } } },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "413": { "$ref": "#/components/responses/BodyTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/projects/{id}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Get one project's settings without its ingestion key",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } },
+          { "$ref": "#/components/parameters/AdminOrigin" }
+        ],
+        "responses": {
+          "200": { "description": "Project settings.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "404": { "$ref": "#/components/responses/ProjectNotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "operationId": "getStats",
+        "summary": "Count events and distinct day-scoped sessions",
+        "description": "Only the listed query parameters are accepted. Counts are zero for an empty range of data.",
+        "parameters": [{ "$ref": "#/components/parameters/ProjectId" }, { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }, { "$ref": "#/components/parameters/AdminOrigin" }],
+        "responses": {
+          "200": { "description": "Totals for the requested project and range.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Stats" }, "example": { "events": 2, "sessions": 1 } } } },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "404": { "$ref": "#/components/responses/ProjectNotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/breakdown": {
+      "get": {
+        "operationId": "getBreakdown",
+        "summary": "Group events by one dimension",
+        "description": "Only the listed query parameters are accepted. Groups include all events in the range, ordered by event count descending, then value ascending. One session can appear in multiple groups.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectId" }, { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }, { "$ref": "#/components/parameters/AdminOrigin" },
+          { "in": "query", "name": "dimension", "required": true, "description": "A built-in dimension or prop:<key> where the project allowlists that key.", "schema": { "type": "string", "oneOf": [{ "enum": ["eventName", "appVersion", "osName", "path", "referrer"] }, { "pattern": "^prop:[A-Za-z][A-Za-z0-9_]{0,39}$" }] } }
+        ],
+        "responses": {
+          "200": { "description": "Top 100 groups; empty rows array when nothing matches.", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["rows"], "properties": { "rows": { "type": "array", "maxItems": 100, "items": { "$ref": "#/components/schemas/BreakdownRow" } } }, "additionalProperties": false
+          }, "example": { "rows": [{ "value": "pdf", "events": 2, "sessions": 1 }] } } } },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "404": { "$ref": "#/components/responses/ProjectNotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    },
+    "/api/v1/timeseries": {
+      "get": {
+        "operationId": "getTimeseries",
+        "summary": "Count events in nonempty UTC hour or day buckets",
+        "description": "Only the listed query parameters are accepted. Buckets are ordered chronologically. Empty buckets are omitted, not filled with zeroes.",
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectId" }, { "$ref": "#/components/parameters/From" }, { "$ref": "#/components/parameters/To" }, { "$ref": "#/components/parameters/AdminOrigin" },
+          { "name": "interval", "in": "query", "required": true, "schema": { "type": "string", "enum": ["hour", "day"] } }
+        ],
+        "responses": {
+          "200": { "description": "Nonempty buckets; empty rows array when nothing matches.", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["rows"], "properties": { "rows": { "type": "array", "maxItems": 745, "items": { "$ref": "#/components/schemas/TimeseriesRow" } } }, "additionalProperties": false
+          } } } },
+          "400": { "$ref": "#/components/responses/BadInput" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/ForbiddenOrigin" },
+          "404": { "$ref": "#/components/responses/ProjectNotFound" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/NotConfigured" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AdminBearer": { "type": "http", "scheme": "bearer", "description": "Private ADMIN_TOKEN for the entire instance. Use server-side; never distribute it with an app or website." },
+      "AppKey": { "type": "apiKey", "in": "header", "name": "App-Key", "description": "Public project ingestion key returned once by createProject. Cannot read reports or manage projects." }
+    },
+    "parameters": {
+      "AdminOrigin": { "in": "header", "name": "Origin", "description": "Omit for a server-side client. If present, must exactly match the instance's own origin.", "schema": { "type": "string", "format": "uri" } },
+      "ProjectId": { "in": "query", "name": "projectId", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } },
+      "From": { "in": "query", "name": "from", "required": true, "description": "Inclusive start, normalized to UTC.", "schema": { "$ref": "#/components/schemas/Timestamp" } },
+      "To": { "in": "query", "name": "to", "required": true, "description": "Exclusive end. The range must be positive and no longer than 31 days.", "schema": { "$ref": "#/components/schemas/Timestamp" } }
+    },
+    "schemas": {
+      "Uuid": { "type": "string", "format": "uuid" },
+      "Timestamp": { "type": "string", "format": "date-time", "description": "ISO date and time with seconds and a timezone (Z or ±HH:MM)." },
+      "RegisteredOrigin": { "type": "string", "format": "uri", "minLength": 1, "maxLength": 200, "pattern": "^https?://[^/?#@\\s]+$", "description": "Exact canonical HTTP(S) origin, including a non-default port if used. No path, trailing slash, credentials, query or fragment.", "examples": ["https://shop.example"] },
+      "ProjectName": { "type": "string", "minLength": 1, "maxLength": 100 },
+      "ProjectType": { "type": "string", "enum": ["app", "website"] },
+      "Origins": { "type": "array", "maxItems": 20, "items": { "$ref": "#/components/schemas/RegisteredOrigin" } },
+      "PropertyKeys": { "type": "array", "maxItems": 20, "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,39}$" }, "description": "Allowlisted custom property names. Sensitive names such as email, userId and token are rejected." },
+      "CreateProject": {
+        "type": "object", "additionalProperties": false, "required": ["name", "type"],
+        "properties": {
+          "name": { "$ref": "#/components/schemas/ProjectName" }, "type": { "$ref": "#/components/schemas/ProjectType" },
+          "origins": { "$ref": "#/components/schemas/Origins", "default": [] }, "properties": { "$ref": "#/components/schemas/PropertyKeys", "default": [] }
+        },
+        "if": { "properties": { "type": { "const": "website" } } }, "then": { "required": ["origins"], "properties": { "origins": { "minItems": 1 } } },
+        "description": "A website requires at least one origin. Duplicate entries in origins or properties count toward the input limit but are stored only once."
+      },
+      "Project": {
+        "type": "object", "additionalProperties": false, "required": ["id", "name", "type", "origins", "properties", "createdAt"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" }, "name": { "$ref": "#/components/schemas/ProjectName" }, "type": { "$ref": "#/components/schemas/ProjectType" },
+          "origins": { "$ref": "#/components/schemas/Origins", "uniqueItems": true }, "properties": { "$ref": "#/components/schemas/PropertyKeys", "uniqueItems": true }, "createdAt": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "CreatedProject": {
+        "type": "object", "additionalProperties": false, "required": ["id", "name", "type", "origins", "properties", "createdAt", "appKey"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" }, "name": { "$ref": "#/components/schemas/ProjectName" }, "type": { "$ref": "#/components/schemas/ProjectType" },
+          "origins": { "$ref": "#/components/schemas/Origins", "uniqueItems": true }, "properties": { "$ref": "#/components/schemas/PropertyKeys", "uniqueItems": true }, "createdAt": { "$ref": "#/components/schemas/Timestamp" },
+          "appKey": { "type": "string", "description": "Public ingest-only key for this project. Not included on reads." }
+        }
+      },
+      "Event": {
+        "type": "object", "additionalProperties": false, "required": ["eventId", "sessionId", "timestamp", "eventName"],
+        "properties": {
+          "eventId": { "$ref": "#/components/schemas/Uuid", "description": "Use the same random UUID when retrying this event." },
+          "sessionId": { "$ref": "#/components/schemas/Uuid", "description": "Ephemeral session UUID, never stored raw. Counts use a project- and UTC-day-scoped session hash, not unique people." },
+          "timestamp": { "$ref": "#/components/schemas/Timestamp", "description": "At most 366 days old or five minutes in the future, relative to ingestion. Stored in UTC." },
+          "eventName": { "type": "string", "minLength": 1, "maxLength": 100, "description": "Generic action name. Sensitive-looking values and control characters invalidate the batch.", "examples": ["export_finished"] },
+          "systemProps": {
+            "type": "object", "additionalProperties": true,
+            "description": "Unknown keys and wrong-typed, oversized or unsafe values are ignored, not validation errors. Only appVersion, appBuildNumber, osName, osVersion, locale, sdkVersion and deviceModel (safe strings up to 100 characters) and isDebug (boolean) can be stored.",
+            "examples": [{ "appVersion": "1.0", "isDebug": false }]
+          },
+          "props": { "type": "object", "maxProperties": 20, "additionalProperties": { "oneOf": [{ "type": "string", "maxLength": 200 }, { "type": "number" }, { "type": "boolean" }] }, "description": "Flat strings, finite numbers and booleans only. After validation only allowlisted, non-sensitive entries are stored. Avoid personal data; filtering cannot identify every sensitive value." },
+          "path": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "Only a safe HTTP(S) pathname is kept (up to 512 characters); query and fragment are discarded. Invalid or unsafe paths are stored as null. Prefer route templates." },
+          "referrer": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "Only the hostname of a valid, safe absolute HTTP(S) referrer is kept. Other inputs are stored as null." }
+        }
+      },
+      "Count": { "type": "integer", "minimum": 0 },
+      "Stats": { "type": "object", "additionalProperties": false, "required": ["events", "sessions"], "properties": { "events": { "$ref": "#/components/schemas/Count" }, "sessions": { "$ref": "#/components/schemas/Count" } } },
+      "BreakdownRow": {
+        "type": "object", "additionalProperties": false, "required": ["value", "events", "sessions"],
+        "properties": {
+          "value": { "type": ["string", "number", "null"], "description": "Missing values form a null group. JSON booleans in custom properties are returned as SQLite numbers (false = 0, true = 1)." },
+          "events": { "$ref": "#/components/schemas/Count" }, "sessions": { "$ref": "#/components/schemas/Count" }
+        }
+      },
+      "TimeseriesRow": {
+        "type": "object", "additionalProperties": false, "required": ["bucket", "events", "sessions"],
+        "properties": {
+          "bucket": { "type": "string", "format": "date-time", "description": "UTC start of the hour or day, including for partial buckets at either end.", "examples": ["2026-01-01T03:00:00.000Z"] },
+          "events": { "$ref": "#/components/schemas/Count" }, "sessions": { "$ref": "#/components/schemas/Count" }
+        }
+      },
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } }, "additionalProperties": false }
+    },
+    "responses": {
+      "BadInput": { "description": "Malformed or missing JSON, invalid fields, or a rejected project setting, event, dimension or time range.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Invalid input" } } } },
+      "Unauthorized": { "description": "Missing or incorrect admin bearer token.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Unauthorized" } } } },
+      "InvalidAppKey": { "description": "Missing or incorrect public project key, or key exceeds 200 characters.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Invalid App-Key" } } } },
+      "ForbiddenOrigin": { "description": "The Origin is not allowed, or is missing where required.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Origin not allowed" } } } },
+      "ProjectNotFound": { "description": "No project exists with this ID.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Project not found" } } } },
+      "BodyTooLarge": { "description": "Request body exceeds 65,536 bytes.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Body exceeds 64 KiB" } } } },
+      "UnsupportedMediaType": { "description": "Content-Type is missing or is not application/json.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Expected application/json" } } } },
+      "InternalError": { "description": "Unexpected failure; internal details are not returned.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Internal error" } } } },
+      "NotConfigured": { "description": "The instance must have both ADMIN_TOKEN and HASH_SECRET set, each 32 to 1024 characters long.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "Instance is not configured" } } } }
+    }
+  }
+}

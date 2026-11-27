@@ -1,5 +1,7 @@
 # HTTP API
 
+[Download the OpenAPI 3.1.1 contract](./openapi.json) for these HTTP routes. Set `instanceUrl` to your own Worker. The separate [`/mcp` endpoint](../README.md#mcp) uses the MCP protocol.
+
 Use the project's public `appKey` in the `App-Key` header to send events. To create projects or read reports, send the instance's private `ADMIN_TOKEN` as a bearer token in the `Authorization` header. Never put the admin token in a browser or a distributed app.
 
 ## Send your first event
